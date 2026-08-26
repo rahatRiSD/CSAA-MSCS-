@@ -1,0 +1,555 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+\usepackage{hyperref}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\begin{document}
+\title{CALiBRE-AD+: A Nested, Leakage-Audited, Calibrated, Cost-Sensitive Ensemble for Alzheimer's Disease Classification}
+\author{
+\IEEEauthorblockN{MD Rahat Rihan}
+\IEEEauthorblockA{
+\textit{Department of Computer Science} \\
+\textit{American International University-Bangladesh}\\
+Dhaka 1229, Bangladesh \\
+26-94125-2@student.aiub.edu}
+}
+\maketitle
+\begin{abstract}
+Tabular machine-learning studies of Alzheimer's disease (AD) routinely report accuracies near 95\%. Those numbers are meaningful only if the predictors used would actually be available at the moment a prediction is needed, and on the dataset studied here they are not. We audit a public synthetic dataset of 2{,}149 records and show that its headline performance rests on a block of ten clinician-administered cognitive and functional assessments -- instruments that form part of the very diagnostic work-up whose outcome is the label. We split the predictors into a Full track and a deployment-oriented Screening track containing only the 22 variables plausibly available before any such assessment, and evaluate both under an identical protocol. On the Full track our proposed ensemble reaches 0.951 accuracy (95\% bootstrap CI [0.941, 0.960]), 0.928 recall, 0.948 ROC-AUC ([0.935, 0.960]), and a Brier score of 0.043. On the Screening track it reaches 0.490 ROC-AUC and 0.000 MCC: chance. The collapse is uniform across every classifier tested, and we show it is not an artifact of this dataset alone -- an identical pattern has been demonstrated independently for Parkinson's disease when overt motor features are withheld, and data-leakage surveys spanning hundreds of papers across dozens of scientific fields report the same failure mode. We also introduce CALiBRE-AD+, a seven-learner stacked ensemble (Elastic-Net logistic regression, RBF-SVM, Random Forest, Extra Trees, XGBoost, LightGBM, and CatBoost) combined through a regularised logistic meta-learner, followed by adaptive selection between sigmoid and isotonic calibration and a cost-sensitive operating point that weights a missed case five times a false alarm. Imputation, scaling, stacking, calibration, and threshold selection are all confined to outer-training folds -- a discipline we show is not a formality, since the decision threshold in particular is easy to fit on evaluation data without noticing. In a tabular AD benchmark, an explicit feature-provenance audit should be performed and cost-aware metrics should be reported, rather than a single accuracy figure.
+\end{abstract}
+\begin{IEEEkeywords}
+Alzheimer's disease, data leakage, nested cross-validation, stacked ensemble, probability calibration, cost-sensitive learning, model evaluation, machine learning in healthcare.
+\end{IEEEkeywords}
+
+\section{Introduction}
+Alzheimer's disease (AD) is the leading cause of dementia worldwide, and because interventions work best early, there is sustained interest in machine-learning tools \cite{b15} that can flag at-risk individuals from routinely collected data. Reported accuracies on tabular AD datasets are frequently above 95\%. Those figures are attractive, and they invite a question that is rarely asked: what is the model actually reading, and would the same performance survive deployment before a clinical assessment has taken place?
+
+This work began as a replication of a comparative study on a public 2{,}149-patient AD dataset, in which Gradient Boosting was reported as the strongest model at roughly 95\% accuracy \cite{b13}. Reproducing that pipeline exposed two problems. The first is procedural: the original evaluation used a single train--test split with no calibration, no confidence intervals, and no significance testing, so the reported ranking of models is not stable enough to support the conclusions drawn from it. The second is substantive. The features carrying the 95\% are clinician-administered cognitive and functional assessments. They are not upstream risk factors; they are the instruments a clinician uses to reach the diagnosis, so a model given access to them has effectively been told the answer, and its accuracy measures transcription rather than prediction. As we detail in Section~\ref{sec:related}, a subsequent stacking study on this same public dataset reports 97\% accuracy under an identical single-split protocol \cite{b37}, which shows that the problem we describe has not been an isolated occurrence.
+
+We therefore reframe the problem around three questions. First, how much of the reported accuracy is genuine signal from risk and lifestyle variables, and how much is leakage from assessment instruments? Second, can an ensemble be built that not only separates classes but also produces probabilities trustworthy enough to support a defensible clinical operating point? Third, do the apparent gaps between leading models survive statistical scrutiny? To answer these, we contribute a leakage-audited two-track protocol, CALiBRE-AD+, and a nested cross-fitted evaluation that reports discrimination, class-specific, calibration, and cost-aware measures together.
+
+Our findings temper the optimism of prior benchmarks. They are also, in one respect, a caution about our own methodology: an early version of this pipeline selected its decision threshold on pooled out-of-fold predictions covering the whole dataset, which is precisely the class of error this paper criticises. Section~\ref{sec:methodology} describes the nested design that eliminates it, and Section~\ref{sec:reproducibility} states how every number below can be regenerated.
+
+\section{Related Work}
+\label{sec:related}
+Tabular and multimodal machine learning for AD has grown quickly. Deep architectures applied to neuroimaging, gene-expression, and multimodal clinical data report accuracies in the mid-nineties \cite{b1,b2,b9}, while natural-language methods extract social determinants of health, functional-status impairment, and lifestyle indicators from clinical notes and referential communication transcripts \cite{b3,b4,b5,b8}. Speech-based pipelines built on classical and transformer language models reach F1 scores above 0.9 in separating AD from controls \cite{b7,b10}, and transfer-learning approaches report accuracies near 0.88 on challenge data \cite{b11,b12}. Reviews of AI for AD prognosis consistently list data privacy, algorithmic bias, and small, non-representative samples as open problems \cite{b6}. Work on explainable and resource-aware classifiers for adjacent clinical and mental-health tasks includes recursive-feature-elimination logistic regression for dementia \cite{b22}, genetic-algorithm-enhanced anxiety classification \cite{b23}, and lightweight tabular AD tools intended for constrained deployment \cite{b28}, reflecting a broader move toward interpretable models rather than purely accuracy-driven ones.
+
+Ensemble and stacking architectures specifically have been applied to AD classification on several occasions. An \textit{et al.} proposed DELearning, a three-layer deep ensemble that fuses multi-source clinical data through sparse autoencoders, ranks base classifiers with a deep belief network, and reports a 4\% accuracy improvement over conventional stacking on the NACC cohort \cite{b36}. Almohimeed \textit{et al.} built a three-level stacking architecture over the ADNI cognitive sub-scores (ADAS, CDR, FAQ), using particle-swarm optimisation for feature selection and reporting 92--93\% multiclass accuracy \cite{b38}; because the sub-scores fused in that architecture are themselves diagnostic cognitive instruments, the same provenance question we raise here applies to that pipeline as well. Closest to the present study, Hossain \textit{et al.} used the identical public 2{,}149-patient Kaggle dataset analysed in this paper and reported 97\% accuracy from a Gradient-Boosting/XGBoost stack evaluated on a single 80:20 split, with SHAP identifying memory complaints, MMSE, and functional assessment as the leading predictors \cite{b37} -- the same clinical-assessment block we designate as leakage in Section~\ref{sec:leakage-hyp}. Airlangga separately benchmarked deep architectures on the same data at 88.7\% accuracy \cite{b20}. None of these three studies withholds the assessment block, reports calibration, or tests whether their model rankings are statistically distinguishable, which is precisely the combination of gaps CALiBRE-AD+ is designed to close.
+
+A second strand has shifted attention from retrospective diagnosis toward risk prediction using information plausibly available before diagnosis. Aguayo \textit{et al.} compared feed-forward networks, TabTransformer, DenseNet, and regularised Cox models in a longitudinal general-population cohort and found that complex tabular models did not render interpretable statistical baselines obsolete \cite{b26}. Twait \textit{et al.} evaluated dementia prediction from clinically accessible variables and stressed the need for updated models and external validation \cite{b27}. Using the multicentre NACC database, Suresh \textit{et al.} built a 19-feature LightGBM tool reaching ROC-AUC 0.90, while naming cross-sectional design and the absence of external validation as limitations \cite{b28}. Most recently, Akinwumi \textit{et al.} modelled 24-month AD progression on the ADNI cohort under extreme class imbalance (13 progression events among 2{,}423 participants) using only baseline demographic, clinical, and cognitive variables; XGBoost reached AUROC 0.912 but AUPRC only 0.051, and the authors explicitly caution that the result is an early-stage proof-of-concept rather than a clinically deployable tool \cite{b39}. These studies are a far more appropriate comparison for screening than classifiers that already receive cognitive-assessment variables, and we return to this point in Section~\ref{sec:comparison}.
+
+Methodological evidence increasingly explains why strong AD results fail to translate, and this evidence is not confined to Alzheimer's disease. Young \textit{et al.} found substantially lower performance among AD deep-learning studies that used defensible subject-wise splitting, and noted that external validation remained uncommon \cite{b29}. Incorrect cross-validation inflates neuropsychiatric prediction results in a closely related way \cite{b30}. At a much larger scale, Kapoor and Narayanan surveyed reproducibility reviews across 17 scientific fields and identified data leakage in at least 294 papers, proposing a taxonomy of eight leakage types together with model-info sheets intended to catch them before publication \cite{b40}; Sasse \textit{et al.} independently developed a complementary taxonomy of leakage scenarios in supervised machine-learning pipelines, illustrated with worked examples of how leakage enters at each pipeline stage \cite{b41}. A directly parallel demonstration to the one in this paper comes from Starcke \textit{et al.}, who trained nine classifiers for early Parkinson's disease detection with and without overt motor symptoms (tremor, rigidity, bradykinesia): models given the overt features reached high accuracy, while models restricted to subclinical, prodromal indicators collapsed to poor specificity, misclassifying most healthy controls as diseased \cite{b42}. The Full-versus-Screening collapse we report in Section~\ref{sec:results-full}--\ref{sec:results-screen} is, in effect, the AD-specific instance of the same phenomenon these two independent literatures describe as general.
+
+TRIPOD+AI asks authors to report the complete processing and evaluation pathway transparently \cite{b34}, and PROBAST+AI treats validation and applicability as central risk-of-bias concerns \cite{b35}. What is largely absent from the AD-specific literature, including the ensemble architectures reviewed above, is any critical treatment of feature provenance under these broader leakage taxonomies. Instruments such as the Mini-Mental State Examination (MMSE) and Activities of Daily Living (ADL) scales are administered as part of the work-up that produces the diagnosis; using them as ordinary predictors risks target leakage in exactly the sense catalogued by \cite{b40} and \cite{b41}. These studies also seldom report calibration or a cost-sensitive operating point, though both matter clinically, and calibration cannot be inferred from discrimination \cite{b32}. Cross-validated stacking offers a principled way of combining heterogeneous learners \cite{b31}, CatBoost contributes an ordered-boosting alternative \cite{b19}, and decision-curve analysis links probabilistic predictions to net benefit across threshold ranges \cite{b33}. CALiBRE-AD+ assembles these ideas inside an explicit feature-provenance audit.
+
+Table~\ref{tab:relatedwork} summarises twenty representative studies spanning AD-specific ensembles, adjacent risk-prediction work, and the general leakage and calibration literature that motivates our protocol, alongside where the present work sits relative to each.
+
+\begin{table*}[!t]
+\caption{Related Work: Alzheimer's/Neurodegenerative Prediction, Ensemble Design, and Leakage/Calibration Evidence}
+\label{tab:relatedwork}
+\centering
+\footnotesize
+\begin{tabular}{@{}p{2.6cm}p{2.6cm}p{3.3cm}p{2.7cm}p{4.3cm}@{}}
+\toprule
+\textbf{Study (Year)} & \textbf{Data / Domain} & \textbf{Method} & \textbf{Reported Result} & \textbf{Leakage Audit / Calibration / Gap} \\
+\midrule
+Krishna \textit{et al.} \cite{b1} (2023) & AD, imaging features & Deep learning & Not stated in abstract & No provenance audit; single evaluation regime \\
+Abdelwahab \textit{et al.} \cite{b2} (2023) & AD, microarray gene expression & Deep learning & Reported in mid-90s\% range & Biomarker, not tabular-screening; no calibration \\
+An \textit{et al.} \cite{b36} (2020) & AD, NACC multi-source clinical & Sparse-autoencoder + DBN stacking (DELearning) & +4\% over six ensemble baselines & No feature-provenance split; no cost-sensitive threshold \\
+Buribayev \textit{et al.} \cite{b13} (2024) & AD, same 2{,}149-patient Kaggle set & Hybrid-balanced conventional/ensemble classifiers & $\sim$95\% (Gradient Boosting) & Single train--test split; no calibration, CI, or significance test; motivates this paper \\
+Airlangga \cite{b20} (2024) & AD, same multidimensional health data & CNN & 88.7\% & No leakage audit; deep architecture on clinician-assessment features \\
+Hossain \textit{et al.} \cite{b37} (2025) & AD, identical Kaggle dataset & Gradient Boosting + XGBoost stack, LR meta-learner & 97\% accuracy, AUC 0.97 & Same clinical-assessment leakage as \cite{b13}; single 80:20 split; no Screening-track comparison \\
+Almohimeed \textit{et al.} \cite{b38} (2023) & AD, ADNI cognitive sub-scores & Three-level stacking + PSO feature selection & 92--93\% multiclass & Fuses ADAS/CDR/FAQ, themselves diagnostic instruments; provenance not audited \\
+Aguayo \textit{et al.} \cite{b26} (2023) & Neurodegenerative risk, general-population cohort & FFN, TabTransformer, DenseNet, Cox & Complex models did not beat regularised Cox & Pre-diagnostic variables only; no leakage present by design \\
+Twait \textit{et al.} \cite{b27} (2023) & Dementia, clinically accessible variables & Multiple ML classifiers & Modest, screening-realistic & Explicitly calls for external validation \\
+Suresh \textit{et al.} \cite{b28} (2025) & AD, NACC, 19 pre-diagnostic features & LightGBM & ROC-AUC 0.90 & Cross-sectional; no external validation (acknowledged) \\
+Akinwumi \textit{et al.} \cite{b39} (2026) & AD progression, ADNI, extreme imbalance & XGBoost, logistic regression, SHAP & AUROC 0.912, AUPRC 0.051 & Explicit proof-of-concept caveat; threshold optimisation did not fix low precision \\
+Young \textit{et al.} \cite{b29} (2025) & AD deep learning, scoping review & Review of subject-wise vs.\ naive splitting & Naive-split studies substantially overestimate performance & Directly documents the leakage this paper audits \\
+Shim \textit{et al.} \cite{b30} (2021) & Neuropsychiatric biomarkers & Feature-selection leakage case study & Inflated accuracy from improper CV & Same mechanism as our early threshold-leakage error \\
+Kapoor \& Narayanan \cite{b40} (2023) & 17 scientific fields, 294 papers & Survey + leakage taxonomy (8 types) & Leakage found across all 17 fields & Establishes that this failure mode is systemic, not AD-specific \\
+Sasse \textit{et al.} \cite{b41} (2025) & Supervised ML, general & Leakage-scenario taxonomy with worked examples & N/A (methodological) & Complements \cite{b40}; used to frame Gap 1 in Section~\ref{sec:gaps} \\
+Starcke \textit{et al.} \cite{b42} (2025) & Parkinson's disease, clinical features & 9 classifiers, overt-feature ablation & High accuracy with overt features; collapse to poor specificity without them & Directly parallel to our Full-vs-Screening collapse \\
+Ahmed \textit{et al.} \cite{b22} (2024) & Dementia, explainable AI & RFE + Logistic Regression & Reported as competitive, interpretable & No cost-sensitive operating point \\
+Ayon \textit{et al.} \cite{b23} (2025) & Anxiety classification (adjacent) & Genetic-algorithm-enhanced ML & Improved over baseline & Threshold fixed at default; no calibration reported \\
+Van Calster \textit{et al.} \cite{b32} (2019) & Predictive analytics, general & Position paper on calibration & N/A & Establishes that discrimination cannot substitute for calibration \\
+\textbf{This work} & AD, same Kaggle dataset, Full \& Screening tracks & \textbf{CALiBRE-AD+}: 7-learner nested stack + adaptive calibration + cost-sensitive threshold & \textbf{Full 0.951 Acc / 0.948 AUC; Screening 0.490 AUC (chance)} & \textbf{Explicit provenance audit; nested calibration and threshold selection; bootstrap CI and McNemar testing} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Critical Gaps in Previous Studies}
+\label{sec:gaps}
+Three gaps recur across the literature above, and each motivates a specific design decision here.
+
+\textbf{Gap 1: no leakage audit on tabular AD benchmarks.} Comparative studies on this dataset \cite{b13,b20,b37}, the ensemble architectures reviewed in Section~\ref{sec:related} \cite{b36,b38}, and the wider tabular-AD literature \cite{b1,b2}, report a headline accuracy without asking whether the predictor set contains instruments that are themselves part of the diagnostic work-up. MMSE and ADL are used as ordinary features throughout. The same concern has been raised independently for deep-learning AD pipelines \cite{b29} and for neurodegenerative risk models trained on general-population cohorts \cite{b26}, and it is not particular to AD: Kapoor and Narayanan's survey of 294 papers across 17 fields \cite{b40} and Sasse \textit{et al.}'s leakage taxonomy \cite{b41} both show the same failure recurring wherever a pipeline is assembled without an explicit check on when each feature becomes available, and Starcke \textit{et al.} reproduce an essentially identical collapse for Parkinson's disease under an overt-feature ablation \cite{b42}. This is not one dataset misbehaving. Our response is the two-track protocol of Section~\ref{sec:methodology}, which makes the failure mode impossible to conceal because the Screening track is reported beside the Full track every time.
+
+\textbf{Gap 2: single-split evaluation without calibration or significance testing.} The original study on this dataset used one train--test split with no confidence intervals, no calibration, and no test of whether ranking differences are real \cite{b13}; the subsequent stacking study on the same data repeats the pattern with an 80:20 split and no significance testing \cite{b37}. The pattern recurs in adjacent NLP- and speech-based AD work \cite{b3,b7,b11}, where accuracy or F1 is given as a point estimate. A recent survey makes the same observation at the field level, finding that reproducibility and generalisability are rarely evaluated systematically even in the more mature neuroimaging literature \cite{b25}. Our response is a stratified five-fold outer evaluation with three-fold inner cross-fitting, keeping preprocessing, stacking, calibration, and threshold selection outside every outer test fold.
+
+\textbf{Gap 3: no cost-aware or calibrated operating point.} Existing classifiers, including recent explainable and lightweight designs for adjacent risk-prediction tasks \cite{b22,b23}, and even the most recent AD progression work under extreme class imbalance \cite{b39}, are evaluated at the default 0.5 threshold or a discrimination-only metric, although a missed AD case and an unnecessary follow-up carry very different costs. Calibrating ensemble output has been shown to matter in other high-stakes clinical settings, such as mortality prediction in lymphoma \cite{b24}. Our response is CALiBRE-AD+'s comparison of sigmoid and isotonic calibration inside each outer-training fold, together with an explicit 5:1 cost-sensitive threshold search, supported by a sensitivity analysis over four cost ratios.
+
+\section{Contributions}
+\begin{itemize}
+\item A leakage-audited two-track protocol that partitions the feature space into an assessment-driven Full track and a deployable Screening track, quantifying how much of a benchmark accuracy is signal and how much is target leakage.
+\item CALiBRE-AD+, a five-stage architecture combining seven learners spanning linear, kernel, bagging, and boosting families through an L2-regularised logistic meta-learner.
+\item Nested cross-fitted customisation, in which imputation, scaling, inner out-of-fold meta-features, calibrator selection, and threshold selection are learned only from each outer-training fold.
+\item Adaptive calibration that chooses between sigmoid and isotonic mapping by inner cross-fitted Brier score rather than assuming one is universally preferable.
+\item An explicit cost-sensitive decision rule minimising an illustrative 5:1 false-negative-to-false-positive cost, reported alongside 1:1, 2:1, and 10:1 alternatives so that no single unexamined cost assumption drives the conclusion.
+\item A twenty-study related-work synthesis (Table~\ref{tab:relatedwork}) that situates this dataset's leakage problem within the broader, field-spanning evidence on data leakage and calibration in machine-learning-based science.
+\item A component-wise ablation, executed under the identical nested protocol, testing whether stacking, calibration, and thresholding each earn their place; a learner-bank ablation (four learners vs. seven) is specified but, as documented in Section~\ref{sec:ablation}, was not executed and is left as verified future work rather than reported as a result.
+\end{itemize}
+
+\section{Data and the Leakage Hypothesis}
+\label{sec:leakage-hyp}
+\subsection{Dataset}
+We use a public synthetic Alzheimer's dataset of 2{,}149 records with 35 attributes, released under a CC-BY 4.0 licence and previously distributed with a hybrid-balancing study \cite{b13,b14}; the same file underlies the stacking study of Hossain \textit{et al.} \cite{b37}. The exact file analysed has MD5 prefix \texttt{f01b1f41}. Removing two non-informative identifier columns (\texttt{PatientID} and \texttt{DoctorInCharge}) leaves 32 predictors and the binary \texttt{Diagnosis} target. Classes are imbalanced: 1{,}389 negative (64.6\%) and 760 positive (35.4\%). Features span demographics, lifestyle, comorbidities, clinical measurements, and a block of cognitive and functional assessment scores.
+
+Because the data are synthetic, the results below are evidence about this benchmark and this evaluation protocol. They are not clinical evidence, and we are careful throughout to distinguish the two.
+
+\subsection{Feature provenance}
+We hypothesise that a small block of clinician-administered assessments carries almost all label information. We designate ten features as clinical: MMSE, FunctionalAssessment, ADL, MemoryComplaints, BehavioralProblems, Confusion, Disorientation, PersonalityChanges, DifficultyCompletingTasks, and Forgetfulness. The remaining 22 features form the Screening set -- information plausibly on file before any formal cognitive assessment.
+
+The partition is a judgement about \emph{when} a variable becomes available, not about how predictive it is. A blood-pressure reading and an ADL score may both be recorded in the same clinic visit, but only the second is generated by the act of diagnosing. This is why the audit is a statement about deployment rather than about feature importance, and it is the same distinction Starcke \textit{et al.} draw between overt and prodromal features in their Parkinson's disease study \cite{b42}.
+
+A correlation check already separates the two groups cleanly. The five features most correlated with \texttt{Diagnosis} are all clinical, with $|r|$ between 0.224 and 0.365, whereas the strongest screening feature (\texttt{SleepQuality}) reaches only $|r| = 0.057$. An order of magnitude separates the blocks, which motivates evaluating both tracks separately rather than reporting a single pooled number.
+
+\section{Proposed Methodology}
+\label{sec:methodology}
+\subsection{Pipeline overview}
+Fig.~\ref{fig:pipeline} shows the dataflow. The audit first creates the Full and Screening tracks. Each track is evaluated over five stratified outer folds. Inside an outer-training fold, median imputation and standardisation are fitted without any access to the outer test fold, using scikit-learn \cite{b16}. Three-fold inner cross-fitting then produces seven out-of-fold probabilities per training record, which train a regularised logistic meta-learner. A second inner cross-fitting step produces out-of-fold meta-scores, used for calibrator comparison and threshold selection. The fitted base learners, meta-learner, selected calibrator, and threshold are applied once to the untouched outer test fold. Pooling the five outer-test prediction vectors gives the reported metrics.
+
+\begin{figure}[!t]
+\centering
+\fbox{\parbox{0.95\linewidth}{\footnotesize
+\textbf{Leakage-free CALiBRE-AD+ pipeline}
+\begin{enumerate}
+\setlength\itemsep{0.15em}
+\item Feature-provenance audit: Full and Screening tracks
+\item Five stratified outer train--test folds
+\item Three-fold inner preprocessing and base OOF prediction
+\item Cross-fitted stack, calibrator selection, threshold search
+\item One prediction on the untouched outer test fold
+\end{enumerate}
+}}
+\caption{Leakage-free CALiBRE-AD+ pipeline. Every fitted transformation, including the decision threshold, remains inside the outer training fold.}
+\label{fig:pipeline}
+\end{figure}
+
+It is worth being precise about what the inner loop does, since the term \emph{nested cross-validation} is often reserved for hyperparameter search. Hyperparameters here are fixed a priori (Table~\ref{tab:hyperparams}); the inner folds instead protect three quantities that are otherwise fitted on evaluation data without anyone noticing: the meta-learner weights, the choice of calibrator, and the operating threshold. The design is best described as cross-fitted stacking with nested calibrator and threshold selection.
+
+\subsection{Architecture, stage by stage}
+Fig.~\ref{fig:architecture} shows the CALiBRE-AD+ architecture as five sequential stages, and Table~\ref{tab:architecture} summarises the input, operation, and output of each. We describe them in order below.
+
+\textit{Stage 1 -- Input audit and outer split.} The 35 raw attributes are partitioned by provenance into the Full track (32 predictors, clinical assessments included) and the Screening track (22 predictors, the ten clinical-assessment items and the two identifier columns withheld). Each track is then split into five stratified outer folds, so class balance is preserved in every fold.
+
+\textit{Stage 2 -- Nested preprocessing.} Within each outer-training fold, and only within that fold, median imputation and standardisation are fitted. An inner three-fold split of the same outer-training fold is used to generate out-of-fold predictions in Stage 3, so that no base learner ever scores a record it helped preprocess or fit.
+
+\textit{Stage 3 -- Heterogeneous base-learner bank.} Seven learners spanning four inductive-bias families are trained on the inner folds: Elastic-Net logistic regression (linear), RBF-SVM (kernel), Random Forest and Extra Trees (bagging), and XGBoost, LightGBM, and CatBoost (boosting) \cite{b17,b18,b19}. Class weights are applied to the linear, kernel, and bagging learners to counter the 35.4\% positive rate. The stage's output is seven inner-fold out-of-fold probability vectors $\{P_m\}_{m=1}^{7}$ per training record.
+
+\textit{Stage 4 -- Meta-learning and adaptive calibration.} An L2-regularised logistic meta-learner stacks the seven probability vectors into $p_{\mathrm{stack}} = \sigma(\mathbf{w}^\top\mathbf{z}+b)$. A calibrator selector then compares sigmoid calibration $g_{\mathrm{sig}}(p_{\mathrm{stack}}) = \sigma(ap_{\mathrm{stack}}+b)$ against isotonic calibration $g_{\mathrm{iso}}(p_{\mathrm{stack}})$ by inner cross-validated Brier score and refits the winner, producing the calibrated probability $p_{\mathrm{cal}}$.
+
+\textit{Stage 5 -- Cost-sensitive decision and pooled evaluation.} An explicit cost-sensitive threshold search locates $\tau^{*} = \arg\min_{\tau\in(0,1)} C(\tau)$ with $C(\tau)=5\!\cdot\!FN(\tau)+1\!\cdot\!FP(\tau)$, entirely within the outer-training fold. The fitted pipeline -- imputer, scaler, seven base learners, meta-learner, calibrator, and threshold -- is then applied exactly once to the outer test fold. Predictions from all five outer folds are pooled, their uncertainty is quantified with 2{,}000 bootstrap resamples, and $\hat{y}=\mathbb{I}[p_{\mathrm{cal}}\geq\tau^{*}]$ is scored with ROC-AUC, PR-AUC, MCC, and Brier score on both tracks.
+
+\begin{table}[!t]
+\caption{CALiBRE-AD+ Architecture Summary}
+\label{tab:architecture}
+\centering
+\footnotesize
+\begin{tabular}{@{}p{0.9cm}p{1.7cm}p{2.4cm}p{1.9cm}@{}}
+\toprule
+\textbf{Stage} & \textbf{Input} & \textbf{Operation} & \textbf{Output} \\
+\midrule
+1 & 35 raw attributes & Provenance audit; stratified 5-fold outer split & Full / Screening tracks, 5 outer folds each \\
+2 & Outer-training fold & Median imputation; standardisation; 3-fold inner split & Preprocessed inner folds \\
+3 & Inner folds & 7 heterogeneous base learners, class-weighted & 7 inner-OOF probability vectors \\
+4 & $\{P_m\}_{m=1}^{7}$ & L2 logistic stacking; sigmoid vs.\ isotonic calibrator selection (Brier) & Calibrated probability $p_{\mathrm{cal}}$ \\
+5 & $p_{\mathrm{cal}}$, outer test fold & Cost-sensitive threshold search; single outer-fold prediction; pooling & Pooled predictions, bootstrap CI, metrics \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig2_architecture.png}
+\caption{CALiBRE-AD+: Nested, Leakage-Audited, Calibrated, Cost-Sensitive Stacking Ensemble Architecture.}
+\label{fig:architecture}
+\end{figure*}
+
+\subsection{Learner bank and customisation}
+CALiBRE-AD+ (Cost-sensitive, Leakage-audited, caliBRatEd Ensemble for AD) uses seven learners. Elastic-Net logistic regression supplies a sparse linear component; RBF-SVM represents smooth non-linear boundaries; Random Forest and Extra Trees contribute two different randomisation mechanisms; and XGBoost, LightGBM, and CatBoost contribute complementary boosting strategies \cite{b17,b18,b19}. This is a broader bank than the two-learner stack of Hossain \textit{et al.} \cite{b37} or the six-base-model layer of An \textit{et al.} \cite{b36}, but the premise is not that more models are better -- Section~\ref{sec:ablation} tests that premise directly -- but that a meta-learner benefits from predictions generated by genuinely different inductive biases, since correlated errors cannot be averaged away.
+
+Customisation occurs at three levels. At the data level, the two tracks are processed independently, and median imputation and standardisation are fitted per fold. At the algorithm level, class weights are applied to the linear, kernel, and bagging learners to counter the 35.4\% positive rate, and tree depth, leaf size, learning rate, and estimator count are held to conservative values appropriate to a sample of this size. At the decision level, the calibrator and threshold are selected per fold. The calibrator chosen was sigmoid (3 of 5 folds) and isotonic (2 of 5) across the five Full-track folds, and sigmoid (5 of 5 folds) across the Screening folds.
+
+\subsection{Mathematical formulation}
+Let $\mathbf{x}\in\mathbb{R}^d$ be a record's feature vector ($d=32$ on the Full track, $d=22$ on the Screening track) and $y\in\{0,1\}$ the label. Each base learner $m\in\{1,\ldots,7\}$ produces an inner-fold out-of-fold probability
+\begin{equation}
+p_m = f_m(\mathbf{x}), \quad p_m \in [0,1]. \label{eq:base}
+\end{equation}
+The meta-feature vector concatenates the seven base probabilities,
+\begin{equation}
+\mathbf{z} = [\,p_1,\ldots,p_7\,]^{\top} \in \mathbb{R}^{7}, \label{eq:meta}
+\end{equation}
+and the logistic meta-learner produces the stacked score
+\begin{equation}
+p_{\mathrm{stack}} = \sigma\!\left(\mathbf{w}^{\top}\mathbf{z}+b\right), \qquad \sigma(u)=\frac{1}{1+e^{-u}}, \label{eq:stack}
+\end{equation}
+with $\mathbf{w}\in\mathbb{R}^{7}$ and $b\in\mathbb{R}$ fitted on inner-OOF probabilities only. Because the meta-learner never sees a base prediction made on data the base learner was trained on, the weights reflect generalisation performance rather than in-sample fit.
+
+A second cross-fitting layer produces meta-level out-of-fold scores $p_{\mathrm{stack}}^{(i)}$, on which two calibration candidates are compared. The sigmoid candidate fits $g_{\mathrm{sig}}(p) = \sigma(ap+b)$ by maximum likelihood, giving a smooth two-parameter correction. The isotonic candidate solves
+\begin{equation}
+g = \arg\min_{h\in\mathcal{M}} \sum_{i=1}^{n} \left(h\!\left(p_{\mathrm{stack}}^{(i)}\right)-y_i\right)^2, \label{eq:isotonic}
+\end{equation}
+where $\mathcal{M}$ is the set of monotonically non-decreasing functions, solved by the pool-adjacent-violators algorithm. The winner, chosen by inner cross-fitted Brier score, is refitted on the full training fold and applied,
+\begin{equation}
+p_{\mathrm{cal}} = g(p_{\mathrm{stack}}). \label{eq:cal}
+\end{equation}
+Both candidates are monotone, so neither can reorder records and neither can change ROC-AUC. That is exactly why the selection criterion must be a proper scoring rule such as Brier rather than a discrimination measure: AUC is blind to the transformation being chosen \cite{b32}.
+
+Finally, within each outer-training fold, the cost-optimal threshold $\tau^{*}$ minimises an explicit clinical cost over the cross-fitted calibrated probabilities,
+\begin{equation}
+\tau^{*} = \arg\min_{\tau\in(0,1)} C(\tau), \qquad C(\tau) = 5\cdot FN(\tau) + 1\cdot FP(\tau), \label{eq:cost}
+\end{equation}
+where $FN(\tau)$ and $FP(\tau)$ are counts obtained by thresholding $p_{\mathrm{cal}}$ at $\tau$. The decision rule is $\hat{y} = \mathbb{I}[\,p_{\mathrm{cal}} \geq \tau^{*}\,]$.
+
+Equation~(\ref{eq:cost}) has an informative closed form under perfect calibration. Reclassifying a record with predicted risk $p$ from negative to positive changes expected cost by $c_{FP}(1-p) - c_{FN}p$, which is favourable when $p \geq c_{FP}/(c_{FP}+c_{FN}) = 1/6 \approx 0.167$. The empirical thresholds we obtain therefore carry information beyond the cost ratio: departure from 0.167 indexes residual miscalibration, and we report the fold-specific values in Section~\ref{sec:results-full} for that reason.
+
+\subsection{Evaluation protocol and metrics}
+We use five stratified outer folds, three stratified inner folds, and random seed 42 throughout. Each outer test record is scored by a pipeline that never used that record for imputation, scaling, base fitting, stacking, calibration, or threshold selection; the five outer-test vectors are pooled once for evaluation \cite{b30}. We report accuracy, precision, recall, F1, ROC-AUC, PR-AUC, MCC, and Brier score. Given
+\begin{equation}
+\text{Accuracy} = \frac{TP+TN}{TP+TN+FP+FN}, \label{eq:acc}
+\end{equation}
+\begin{equation}
+\text{Precision} = \frac{TP}{TP+FP}, \qquad \text{Recall} = \frac{TP}{TP+FN}, \label{eq:pr}
+\end{equation}
+\begin{equation}
+F1 = \frac{2\cdot\text{Precision}\cdot\text{Recall}}{\text{Precision}+\text{Recall}}, \label{eq:f1}
+\end{equation}
+we additionally use MCC because it remains informative under class imbalance where F1 does not, and the Brier score, the mean squared difference between predicted probability and outcome. Brier reflects both calibration and resolution, so we read it beside a reliability diagram rather than treating it as a pure calibration measure \cite{b32}.
+
+Uncertainty comes from 2{,}000 bootstrap resamples of the pooled outer-test predictions at seed 42. Pairwise comparisons use the exact McNemar test -- that is, a binomial test on the discordant pairs -- which is preferable to the $\chi^2$ approximation at the discordant counts seen here. These comparisons are secondary evidence, because the models being compared operate at different thresholds by design.
+
+\section{Experimental Setup}
+\subsection{Reproducibility}
+\label{sec:reproducibility}
+Every quantitative claim in this paper is produced by a numbered cell of the accompanying notebook, which runs top to bottom from a fixed seed. Cell 14 consolidates all reported values into a machine-readable summary from which the numbers in this paper were copied by hand and cross-checked, so the paper should not drift from the code. The mapping is: Tables~\ref{tab:full} and \ref{tab:screening} from cell 8; Table~\ref{tab:sensitivity} from cell 9; Table~\ref{tab:ablation} from cell 10; confidence intervals and the CatBoost/LightGBM McNemar tests from cell 11; Figs.~\ref{fig:leakage}--\ref{fig:shap-importance} from cell 12; and Figs.~\ref{fig:shap-summary}--\ref{fig:shap-importance} from cell 13. Three items claimed by an earlier, AI-drafted version of this paper have no corresponding cell and are therefore not included as executed results: a four-versus-seven-learner ablation table, a learning-curve figure (Section~\ref{sec:learning}), and a correlation-heatmap figure (Section~\ref{sec:shap}). We treat their absence as a verification finding rather than smoothing over it. Internal self-consistency checks confirm that the 5:1 row of Table~\ref{tab:sensitivity} equals the CALiBRE-AD+ row of Table~\ref{tab:full}, that the first row of Table~\ref{tab:ablation} equals the corresponding single-learner row of Table~\ref{tab:full}, and that the confusion matrix of Fig.~\ref{fig:confusion} implies the reported accuracy; all three checks pass (see the project's verification log).
+
+Table~\ref{tab:env} reports the environment and Table~\ref{tab:hyperparams} the hyperparameters, both emitted by the notebook rather than transcribed. Hyperparameters were fixed in advance and deliberately conservative; we did not tune them against test performance, since doing so would reintroduce, through the back door, the optimism the nested design is meant to remove.
+
+\begin{table}[!t]
+\caption{Hardware and Software Environment}
+\label{tab:env}
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Component} & \textbf{Specification} \\
+\midrule
+Compute platform & Containerised CPU runtime \\
+Accelerator & CPU only; no GPU used \\
+Logical CPUs & 4 \\
+Operating system & Linux 6.12 (x86\_64, glibc 2.35) \\
+Python & 3.12.13 \\
+Key libraries & pandas 2.3.3; NumPy 2.0.2; \\
+ & scikit-learn 1.6.1; XGBoost 3.2.0; \\
+ & LightGBM 4.6.0; CatBoost 1.2.10 \\
+Random seed & 42 (global, per learner, per bootstrap) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!t]
+\caption{Training Hyperparameters}
+\label{tab:hyperparams}
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Model} & \textbf{Key hyperparameters} & \textbf{Value} \\
+\midrule
+Elastic-Net LR & $C$, $l_1$ ratio, weights & 1.0, 0.5, balanced \\
+RBF-SVM & $C$, $\gamma$, weights & 10, scale, balanced \\
+Random Forest & trees, depth, leaf size & 200, 10, 1 \\
+Extra Trees & trees, depth, leaf size & 200, 10, 1 \\
+XGBoost & trees, depth, rate & 200, 3, 0.05 \\
+LightGBM & trees, leaves, rate & 200, 15, 0.05 \\
+CatBoost & iterations, depth, rate & 200, 4, 0.05 \\
+Meta-learner & penalty, $C$, weights & L2, 1.0, balanced \\
+Calibration & candidates, criterion & sigmoid/isotonic, Brier \\
+Cost ratio & primary; sensitivity & 5:1; 1, 2, 5, 10 \\
+CV protocol & outer, inner, seed & 5, 3, 42 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Results and Discussion}
+\subsection{Full-track performance}
+\label{sec:results-full}
+Table~\ref{tab:full} reports every model on the Full feature set. The picture is one of near-saturation: the boosting learners and the ensemble sit within a narrow band, and the differences between them are small relative to their confidence intervals. CALiBRE-AD+ reached accuracy 0.951, precision 0.934, recall 0.928, F1 0.931, ROC-AUC 0.948, and MCC 0.893 at its fold-specific 5:1 threshold, with a Brier score of 0.043.
+
+\begin{table*}[!t]
+\caption{Full-Track Performance (Nested Five-Fold Out-of-Fold)}
+\label{tab:full}
+\centering
+\begin{tabular}{@{}lcccccccc@{}}
+\toprule
+\textbf{Model} & \textbf{Acc} & \textbf{Pr} & \textbf{Rc} & \textbf{F1} & \textbf{AUC} & \textbf{PR-AUC} & \textbf{MCC} & \textbf{Br} \\
+\midrule
+Elastic-Net LR & 0.819 & 0.713 & 0.814 & 0.760 & 0.898 & 0.837 & 0.619 & 0.12 \\
+RBF-SVM & 0.819 & 0.776 & 0.684 & 0.727 & 0.884 & 0.823 & 0.595 & 0.12 \\
+Random Forest & 0.941 & 0.945 & 0.884 & 0.914 & 0.950 & 0.930 & 0.870 & 0.08 \\
+Extra Trees & 0.883 & 0.846 & 0.817 & 0.831 & 0.929 & 0.889 & 0.742 & 0.13 \\
+XGBoost & 0.953 & 0.947 & 0.917 & 0.932 & 0.950 & 0.940 & 0.896 & 0.05 \\
+LightGBM & 0.955 & 0.949 & 0.922 & 0.935 & 0.952 & 0.936 & 0.901 & 0.04 \\
+CatBoost & 0.955 & 0.949 & 0.922 & 0.935 & 0.951 & 0.939 & 0.901 & 0.04 \\
+CALiBRE-AD+ & 0.951 & 0.934 & 0.928 & 0.931 & 0.948 & 0.929 & 0.893 & 0.04 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Three observations follow. First, the ensemble does not win on raw accuracy, and we do not claim that it does; the single strongest learner was LightGBM. What the stack buys is probability quality and sensitivity at a defensible operating point, which is what a screening-adjacent tool actually needs. Second, the fold-specific thresholds were 0.075, 0.240, 0.165, 0.205, and 0.130, averaging 0.163. Each was derived independently from its own outer-training fold, and the spread across folds is itself a small honesty check: a threshold selected on pooled data would show no such variation. Third, all thresholds sit above the 0.167 implied by a perfectly calibrated model under a 5:1 cost, which indicates residual over-confidence at the low-probability end that calibration reduces but does not eliminate.
+
+Bootstrap 95\% intervals were [0.941, 0.960] for accuracy and [0.935, 0.960] for ROC-AUC. Exact McNemar comparisons of thresholded errors found no significant difference against CatBoost ($p=0.0768$) or LightGBM ($p=0.0768$). An earlier, AI-drafted version of this paper also reported a McNemar $p$-value against XGBoost; the notebook does not compute that comparison (only CatBoost and LightGBM are tested), so we removed the unsupported figure rather than invent one. We read the two confirmed comparisons as the substantive finding rather than a disappointment: on this dataset the leading models we did test are statistically indistinguishable, and any paper that ranks them by third-decimal accuracy from a single split is reporting noise -- including, on the evidence of Table~\ref{tab:relatedwork}, the 95\% and 97\% single-split figures reported for this exact dataset elsewhere \cite{b13,b37}.
+
+\subsection{The leakage collapse}
+\label{sec:results-screen}
+The central result is Fig.~\ref{fig:leakage} and Table~\ref{tab:screening}. With the ten assessment features withheld and only the 22 screening features available, performance falls to chance across the board. ROC-AUC gathers around 0.50, F1 for the positive class becomes erratic, and MCC sits at zero. CALiBRE-AD+ obtained Screening ROC-AUC 0.490 and MCC 0.000.
+
+\begin{table}[!t]
+\caption{Screening-Track Performance (Clinical Features Withheld)}
+\label{tab:screening}
+\centering
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Model} & \textbf{Acc} & \textbf{F1} & \textbf{AUC} & \textbf{MCC} \\
+\midrule
+Elastic-Net LR & 0.531 & 0.445 & 0.530 & 0.060 \\
+RBF-SVM & 0.646 & 0.000 & 0.493 & 0.000 \\
+Random Forest & 0.617 & 0.195 & 0.509 & 0.020 \\
+Extra Trees & 0.604 & 0.271 & 0.515 & 0.034 \\
+XGBoost & 0.621 & 0.111 & 0.479 & $-$0.016 \\
+LightGBM & 0.602 & 0.190 & 0.488 & $-$0.012 \\
+CatBoost & 0.641 & 0.072 & 0.500 & 0.025 \\
+CALiBRE-AD+$^\dagger$ & 0.354 & 0.523 & 0.490 & 0.000 \\
+\bottomrule
+\end{tabular}
+\\[2pt]
+\raggedright\footnotesize $^\dagger$At chance-level AUC, an elevated recall and F1 follow from the asymmetric threshold and are not evidence of discrimination; see the discussion below.
+\end{table}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig3_leakage_audit.png}
+\caption{Leakage audit. ROC-AUC per model on the Full feature set (blue) against Screening-only (orange); the dashed line marks chance.}
+\label{fig:leakage}
+\end{figure}
+
+The ensemble's Screening row deserves comment, because read carelessly it looks like a success. Its F1 of 0.523 sits well above several baselines while its MCC is 0.000. Both are correct. Under a 5:1 cost and scores containing no ranking information, an almost-all-positive rule is cheap: Eq.~(\ref{eq:cost}) is minimised by classifying nearly everyone positive, which produces high recall, moderate F1, and near-zero MCC simultaneously. The threshold was derived independently inside each Screening outer-training fold, so this is not a Full-track threshold transferred across. It is a clean illustration of why threshold-dependent metrics must be read beside rank-based and correlation-based ones. Reporting F1 alone here would be actively misleading -- and it is worth noting that neither of the two prior studies on this exact dataset \cite{b13,b37} reports a comparable screening-only ablation at all.
+
+We are careful about what this establishes. It does not show that AD is unpredictable from risk factors in general, nor that real lifestyle and demographic variables lack signal. It shows that this generator placed essentially no label information outside the assessment block, and therefore that a Full-track accuracy computed on this benchmark cannot support any claim of screening readiness. That is a narrower conclusion than the literature usually draws from the same dataset, and it is the one the evidence carries. Read alongside Starcke \textit{et al.}'s Parkinson's disease ablation \cite{b42} and the leakage taxonomies of Kapoor and Narayanan \cite{b40} and Sasse \textit{et al.} \cite{b41}, it is also a specific instance of a pattern documented across dozens of fields, not a peculiarity of this dataset.
+
+\subsection{Calibration and clinical utility}
+Fig.~\ref{fig:reliability} compares the raw stacked score with the adaptively calibrated one. Calibration moved the pooled Brier score from 0.0447 to 0.0429. This is a modest gain, and we resist overstating it: on synthetic data a well-calibrated probability is a statement about the generator, not a validated individual risk. What the calibration layer earns is a meaningful threshold search, since Eq.~(\ref{eq:cost}) is only interpretable when the quantity being thresholded behaves like a probability.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig4_reliability.png}
+\caption{Reliability diagram for the raw stacked score and the adaptively calibrated CALiBRE-AD+ score.}
+\label{fig:reliability}
+\end{figure}
+
+Fig.~\ref{fig:threshold} shows the cost-threshold relationship. Its shape matters as much as its minimum: the basin is broad and flat, meaning the operating point tolerates a good deal of uncertainty in the cost ratio without much penalty. Figs.~\ref{fig:roc} and \ref{fig:pr} confirm that CALiBRE-AD+ and the boosting learners are near-identical in discrimination, consistent with the McNemar results. The confusion matrix at the cost-optimal threshold (Fig.~\ref{fig:confusion}) records 705 true positives against 55 missed cases and 50 false alarms, the intended shift toward sensitivity.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig5_cost_threshold.png}
+\caption{Cost-sensitive threshold selection. Clinical cost $C = 5\cdot FN + 1\cdot FP$ against the decision threshold. The curve is flat-bottomed, so the operating point is robust to modest changes in the assumed cost.}
+\label{fig:threshold}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig6_roc.png}
+\caption{ROC curves, five-fold out-of-fold, Full track.}
+\label{fig:roc}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig7_pr.png}
+\caption{Precision--recall curves, Full track.}
+\label{fig:pr}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig8_confusion.png}
+\caption{CALiBRE-AD+ confusion matrix at the fold-specific cost-optimal threshold.}
+\label{fig:confusion}
+\end{figure}
+
+Table~\ref{tab:sensitivity} traces the trade-off as the relative cost of a missed case rises. Only the threshold changes across these rows; the underlying probabilities are identical, so ROC-AUC and Brier are invariant and are omitted. The 5:1 row is, by construction, the CALiBRE-AD+ row of Table~\ref{tab:full}, since it is the same configuration, and the build asserts that equality. Because the costs were not elicited from clinicians, this table is a sensitivity analysis and not a claim that 5:1 is the correct operating point for any real service.
+
+\begin{table}[!t]
+\caption{Full-Track Cost-Ratio Sensitivity Analysis}
+\label{tab:sensitivity}
+\centering
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Cost ratio} & \textbf{Acc} & \textbf{Rc} & \textbf{F1} & \textbf{MCC} \\
+\midrule
+1:1 & 0.953 & 0.924 & 0.934 & 0.898 \\
+2:1 & 0.953 & 0.924 & 0.932 & 0.896 \\
+5:1 (primary) & 0.951 & 0.928 & 0.931 & 0.893 \\
+10:1 & 0.946 & 0.928 & 0.923 & 0.881 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Learning behaviour}
+\label{sec:learning}
+An AI-drafted version of this paper included a learning-curve figure (ROC-AUC against training-set size for the strongest boosting learner) with specific claims -- that the cross-validated curve reaches roughly 0.93 within a few hundred records and plateaus from about six hundred onward. We could not verify this: the accompanying notebook has no cell that computes a learning curve, so neither the figure nor the numbers it would report exist anywhere in the executed output. Rather than reproduce an unverified claim, we flag it here explicitly. The qualitative intuition -- that a benchmark whose validation performance plateaus early is limited by the information content of a small number of highly correlated columns rather than by sample size -- is plausible given the SHAP and correlation evidence in Fig.~\ref{fig:shap-importance} and Section~V, but it is not, at present, an executed result, and we list a proper learning-curve cell as required future work (Section~\ref{sec:conclusion}).
+
+\subsection{Feature attribution}
+\label{sec:shap}
+SHAP \cite{b21} analysis makes the leakage explicit at the feature level. Ranked by mean absolute SHAP value, the leading features are FunctionalAssessment, ADL, MMSE, MemoryComplaints, and BehavioralProblems -- all of them clinical assessment items (Figs.~\ref{fig:shap-summary} and \ref{fig:shap-importance}), and the same ranking Hossain \textit{et al.} report for their stacking model on this dataset \cite{b37}, which we read as independent confirmation that the leakage is a property of the data rather than of our particular pipeline. Screening features contribute almost nothing. An AI-drafted version of this paper additionally cited a correlation-heatmap figure at this point; no heatmap-generating cell exists in the notebook, so rather than fabricate one we point instead to the correlation numbers that \emph{are} verified: the pairwise \texttt{Diagnosis}-correlation check in Section~V, where the top five correlates ($|r|\in[0.224,0.365]$) are exactly the clinical block and the strongest screening feature reaches only $|r|=0.057$. This is not a deficiency of the model. It is a property of the data, and surfacing it is precisely what a provenance audit is for. We note that the SHAP model is fitted on the complete dataset, so these values describe in-sample attribution and are used here to characterise the data rather than to estimate generalisation behaviour.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig9_shap_summary.png}
+\caption{SHAP summary (LightGBM, Full track). Assessment features dominate the model output; screening features cluster at zero.}
+\label{fig:shap-summary}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig10_shap_importance.png}
+\caption{Mean $|$SHAP$|$ importance. Red bars are clinical assessment features, blue bars screening features.}
+\label{fig:shap-importance}
+\end{figure}
+
+\subsection{Comparison with prior work}
+\label{sec:comparison}
+Table~\ref{tab:priorwork} places our Full-track result beside previously reported baselines on comparable data. The comparison carries the leakage caveat throughout: all Full-track figures, ours and prior, benefit from assessment features, so the table compares implementations of the same flawed setup rather than competing screening tools. The deployment-relevant comparison is the Screening row, where no method exceeds chance. We therefore present our Full-track figure not as a state of the art to be celebrated but as a benchmark to be interpreted correctly -- and note that the appropriate external comparators are studies such as Suresh \textit{et al.} \cite{b28}, Twait \textit{et al.} \cite{b27}, and Akinwumi \textit{et al.} \cite{b39}, which restrict themselves to pre-diagnostic variables and consequently report more modest, more meaningful numbers.
+
+\begin{table}[!t]
+\caption{Comparison with Prior Work on Comparable Data}
+\label{tab:priorwork}
+\centering
+\footnotesize
+\begin{tabular}{@{}p{2.5cm}p{1.6cm}cp{1.3cm}@{}}
+\toprule
+\textbf{Study} & \textbf{Model} & \textbf{Acc} & \\
+\midrule
+Buribayev \textit{et al.} 2024 \cite{b13} & LR & 0.840 & \\
+Airlangga 2024 \cite{b20} & CNN & 0.887 & \\
+Hossain \textit{et al.} 2025 \cite{b37} & GB+XGB stack & 0.970 & single split \\
+Ours -- Full track & CALiBRE-AD+ & 0.951 & nested CI \\
+Ours -- Screening track & CALiBRE-AD+ & 0.490 & AUC (chance) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Hossain \textit{et al.} figure of 97\% is, on its face, the strongest number in Table~\ref{tab:priorwork}. Read against Table~\ref{tab:screening}, however, it is also the clearest illustration of the paper's argument: it was produced by a pipeline that receives the same clinical-assessment block we withhold in the Screening track, evaluated on one split, with no test of whether the number would survive an equivalent audit.
+
+\subsection{Ablation studies}
+\label{sec:ablation}
+Table~\ref{tab:ablation} isolates each component by building the model up one stage at a time: the strongest single base learner, heterogeneous stacking without calibration, stacking with adaptive calibration at the default 0.5 threshold, and the complete model with the fold-specific cost-optimal threshold. Every row was executed under the identical nested protocol; none is inferred from the others.
+
+\begin{table}[!t]
+\caption{Component Ablation (Full Track)}
+\label{tab:ablation}
+\centering
+\footnotesize
+\begin{tabular}{@{}p{4.3cm}cccc@{}}
+\toprule
+\textbf{Configuration} & \textbf{Acc} & \textbf{AUC} & \textbf{Brr} & \textbf{Rc} \\
+\midrule
+Best single learner (LightGBM) & 0.955 & 0.952 & 0.045 & 0.922 \\
++ Heterogeneous stacking (no calib.) & 0.955 & 0.950 & 0.045 & 0.926 \\
++ Adaptive calibration ($\tau=0.5$) & 0.953 & 0.948 & 0.043 & 0.924 \\
++ Cost-optimal threshold (CALiBRE-AD+) & 0.951 & 0.948 & 0.043 & 0.928 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two rows behave in ways worth stating in advance, because they follow from the construction rather than from the data. Adaptive calibration cannot change ROC-AUC, since both candidate mappings are monotone; its effect is confined to the Brier column. Cost-sensitive thresholding changes neither ROC-AUC nor Brier, since it alters no probability, only the cut applied to them; its effect is confined to the accuracy--recall trade. A reader can use these invariances as a consistency check on the table.
+
+\textit{Note on an unexecuted comparison.} A natural companion to Table~\ref{tab:ablation} would re-run the entire nested pipeline with the bank trimmed to four learners (RBF-SVM, Extra Trees, XGBoost, LightGBM) and compare it against the full seven-learner bank, to test whether the extra three learners earn their place. An AI-drafted version of this paper presented such a table as an executed result. It was not: the accompanying notebook only prints the trimmed learner list as a suggested follow-up run (``rerun \texttt{nested\_run} with \texttt{LEARNER\_NAMES} trimmed \ldots and report both rows'') and never executes it, so no four-learner numbers exist anywhere in the notebook's output. We therefore removed the fabricated table rather than publish unexecuted numbers, and list the four-versus-seven-learner ablation as a concrete item of future work in Section~\ref{sec:conclusion}. A larger bank is a cost -- in runtime, in complexity, and in the number of things that can silently break -- and it should only be retained once this comparison has actually been run.
+
+\subsection{External validation}
+This evaluation is confined to a single dataset under a single provenance split; no external, independently collected AD cohort has been evaluated. We state this as a limitation rather than filling the gap with placeholder numbers. Extending the audit to a second dataset -- a real longitudinal cohort such as ADNI or NACC, or an independent public tabular release -- is future work, and we do not report results we do not have.
+
+\section{Threats to Validity}
+The dataset is synthetic, cross-sectional, and modest in size, so absolute numbers may not transfer to real cohorts; our conclusions concern methodology and relative behaviour. The Screening-track collapse establishes that this generator embeds no pre-assessment signal, which is a fact about the data and not evidence about the predictive value of real risk factors. That said, the same qualitative collapse -- high accuracy with overt or assessment-derived features, chance-level performance without them -- has now been documented on a real Parkinson's disease clinical dataset \cite{b42} and, at a much larger scale, across the 294 papers and 17 fields surveyed by Kapoor and Narayanan \cite{b40}, which is why we treat it as a pattern to be checked for by default rather than a quirk of this generator.
+
+The clinical/screening partition is a defensible reading of feature provenance, but a clinician might place a borderline variable differently. The protocol is robust to such choices in the sense that the collapse is driven by the strongly correlated assessment block, so moving one ambiguous feature would not change the conclusion; we would nonetheless expect a domain expert to review the split before any comparable audit was published on real data, following the kind of structured leakage checklist proposed by Sasse \textit{et al.} \cite{b41}.
+
+The 5:1 cost ratio is illustrative and was not elicited from clinicians, which is why we report four ratios rather than one. Nested cross-fitting reduces internal optimism but cannot substitute for temporal, geographical, or prospective external validation. Finally, MMSE and related instruments may be entirely legitimate inputs to a diagnostic-support model; we label them leakage only relative to the stated pre-assessment screening use case, and the same variables would be unobjectionable in a decision-support tool used after the work-up has begun.
+
+Two further items are explicitly unverified rather than silently omitted. First, the four-versus-seven-learner ablation motivated in Section~\ref{sec:ablation} was never executed and is deferred to future work; we removed a fabricated table rather than publish it. Second, the learning-behaviour analysis of Section~\ref{sec:learning} and the correlation-heatmap figure originally cited in Section~\ref{sec:shap} have no corresponding cell in the accompanying notebook and could not be independently reproduced; both were rewritten to point only at numbers that are actually computed, and a proper learning-curve cell and heatmap cell are listed as required future work.
+
+\section{Conclusion and Future Work}
+\label{sec:conclusion}
+We revisited a widely cited 95\% accuracy benchmark on a tabular Alzheimer's dataset and showed, through a leakage-audited two-track protocol, that the figure is driven almost entirely by clinician-administered assessment features and collapses to chance in a realistic screening setting. The same pattern reappears, on the identical dataset, in a subsequent 97\%-accuracy stacking study published after the original benchmark \cite{b37}, and an analogous collapse has been demonstrated independently for Parkinson's disease \cite{b42} and documented at scale across 294 papers in 17 scientific fields \cite{b40}, which together indicate that this is a general risk in tabular clinical machine learning rather than a property of one dataset.
+
+We proposed CALiBRE-AD+, a seven-learner calibrated and cost-sensitive stacked ensemble evaluated under nested cross-fitting in which preprocessing, stacking, calibration, and threshold selection are all confined to outer-training data. On the Full track it achieved 0.951 accuracy and 0.948 ROC-AUC with a Brier score of 0.043, statistically indistinguishable from the strongest single learners; on the Screening track it achieved 0.490 ROC-AUC, which is chance.
+
+The broader message is a reporting standard rather than a model. A tabular AD benchmark should be accompanied by an explicit feature-provenance audit and by calibrated, cost-aware metrics, because a single accuracy number cannot distinguish a useful screening tool from an expensive transcription of a diagnosis that has already been made.
+
+Future work will validate the protocol on real, longitudinally collected cohorts such as ADNI or NACC, assess subgroup calibration and fairness, conduct clinician-led cost elicitation, add decision-curve analysis \cite{b33}, execute the four-versus-seven-learner ablation and learning-curve analysis deferred in Sections~\ref{sec:ablation} and \ref{sec:learning}, and extend the audit to multimodal settings. Reporting should follow TRIPOD+AI, and risk of bias should be assessed with PROBAST+AI \cite{b34,b35}.
+
+\section*{Data and Code Availability}
+The dataset is publicly available \cite{b13,b14}. The notebook, the generator that produces every table in this paper from the notebook's output, and the scripts that regenerate every figure are available at: \url{https://github.com/rahatRiSD/CSAA-MSCS-}.
+
+\begin{thebibliography}{00}
+\bibitem{b1} K. S. Krishna \textit{et al.}, ``Alzheimer disease detection using AI with deep learning based features,'' \textit{J. Advanced Zoology}, 2023.
+\bibitem{b2} M. M. Abdelwahab, K. A. Al-Karawi, and H. E. Semary, ``Deep learning-based prediction of Alzheimer's disease using microarray gene expression data,'' \textit{Biomedicines}, vol. 11, no. 12, art. 3304, 2023.
+\bibitem{b3} W. Wu \textit{et al.}, ``Natural language processing to identify social determinants of health in Alzheimer's disease and related dementia from EHRs,'' \textit{Health Serv. Res.}, vol. 58, no. 6, pp. 1292--1302, 2023.
+\bibitem{b4} Z. Liu \textit{et al.}, ``Detecting Alzheimer's disease using NLP of referential communication task transcripts,'' pp. 1385--1398, 2022.
+\bibitem{b5} Z. Shen, D. Schutte, Y. Yi \textit{et al.}, ``Classifying the lifestyle status for Alzheimer's disease from clinical notes using deep learning with weak supervision,'' \textit{BMC Med. Inform. Decis. Mak.}, vol. 22, Suppl. 1, art. 88, 2022.
+\bibitem{b6} G. Sekhar, ``Predicting Alzheimer's disease using AI and ML: a comprehensive analysis,'' 2024.
+\bibitem{b7} B. TaghiBeyglou and F. Rudzicz, ``Context is not key: detecting Alzheimer's disease with classical and transformer-based neural language models,'' \textit{Natural Language Processing J.}, vol. 6, art. 100046, 2024.
+\bibitem{b8} J. Laurentiev \textit{et al.}, ``Identifying functional status impairment in people living with dementia through NLP of clinical documents,'' \textit{J. Med. Internet Res.}, vol. 26, e47739, 2024.
+\bibitem{b9} C. Wang, H. Tachimori, H. Yamaguchi \textit{et al.}, ``A multimodal deep learning approach for the prediction of cognitive decline,'' \textit{Transl. Psychiatry}, vol. 14, art. 105, 2024.
+\bibitem{b10} F. Garc\'ia-Gutierrez \textit{et al.}, ``Unveiling the sound of the cognitive status: ML-based speech analysis in the AD spectrum,'' \textit{Alz. Res. Therapy}, vol. 16, art. 26, 2024.
+\bibitem{b11} N. Liu, K. Luo, Z. Yuan, and Y. Chen, ``A transfer learning method for detecting Alzheimer's disease based on speech and NLP,'' \textit{Front. Public Health}, vol. 10, 2022.
+\bibitem{b12} A. Roshanzamir, H. Aghajan, and M. Soleymani Baghshah, ``Transformer-based deep neural network language models for Alzheimer's disease risk assessment,'' \textit{BMC Med. Inform. Decis. Mak.}, vol. 21, art. 92, 2021.
+\bibitem{b13} Z. Buribayev, A. Yerkos, S. Shaikalamova, R. Imanbek, and Z. Zhetpisbay, ``Improving medical diagnosis with a hybrid balancing technique,'' \textit{J. Problems in Comput. Sci. Inf. Technol.}, vol. 2, no. 3, pp. 11--20, 2024.
+\bibitem{b14} Creative Commons, ``Attribution 4.0 International (CC BY 4.0),'' creativecommons.org.
+\bibitem{b15} O. Theobald, \textit{Machine Learning for Absolute Beginners}, 2nd ed., 2017.
+\bibitem{b16} F. Pedregosa \textit{et al.}, ``Scikit-learn: machine learning in Python,'' \textit{J. Mach. Learn. Res.}, vol. 12, pp. 2825--2830, 2011.
+\bibitem{b17} T. Chen and C. Guestrin, ``XGBoost: a scalable tree boosting system,'' in \textit{Proc. KDD}, 2016, pp. 785--794.
+\bibitem{b18} G. Ke \textit{et al.}, ``LightGBM: a highly efficient gradient boosting decision tree,'' in \textit{Proc. NeurIPS}, 2017.
+\bibitem{b19} L. Prokhorenkova, G. Gusev, A. Vorobev, A. V. Dorogush, and A. Gulin, ``CatBoost: unbiased boosting with categorical features,'' in \textit{Proc. NeurIPS}, 2018, pp. 6638--6648.
+\bibitem{b20} G. Airlangga, ``Advancing Alzheimer's diagnosis: a comparative analysis of deep learning architectures on multidimensional health data,'' \textit{Jurnal Informatika Ekonomi Bisnis}, pp. 810--814, 2024.
+\bibitem{b21} S. M. Lundberg and S.-I. Lee, ``A unified approach to interpreting model predictions,'' in \textit{Proc. NeurIPS}, 2017.
+\bibitem{b22} R. Ahmed \textit{et al.}, ``A novel integrated logistic regression model enhanced with recursive feature elimination and explainable AI for dementia prediction,'' \textit{Healthcare Analytics}, art. 100362, 2024.
+\bibitem{b23} S. S. Ayon \textit{et al.}, ``Advancing mental health problems with ML and genetic algorithms for anxiety classification,'' in \textit{LNCS}, pp. 338--350, 2025.
+\bibitem{b24} S. Fan \textit{et al.}, ``Applying probability calibration to ensemble methods to predict 2-year mortality in patients with DLBCL,'' \textit{BMC Med. Inform. Decis. Mak.}, vol. 21, art. 14, 2021, doi: 10.1186/s12911-020-01354-0.
+\bibitem{b25} M. Akhavan Aghdam, S. Bozdag, and F. Saeed, ``Machine-learning models for Alzheimer's disease diagnosis using neuroimaging data: survey, reproducibility, and generalizability evaluation,'' \textit{Brain Informatics}, vol. 12, no. 1, art. 8, 2025.
+\bibitem{b26} G. A. Aguayo \textit{et al.}, ``Machine learning for predicting neurodegenerative diseases in the general older population: a cohort study,'' \textit{BMC Med. Res. Methodol.}, vol. 23, art. 8, 2023, doi: 10.1186/s12874-023-01837-4.
+\bibitem{b27} E. L. Twait, C. L. Andaur Navarro, V. Gudnason, Y.-H. Hu, L. J. Launer, and M. I. Geerlings, ``Dementia prediction in the general population using clinically accessible variables: a proof-of-concept study using machine learning,'' \textit{BMC Med. Inform. Decis. Mak.}, vol. 23, art. 168, 2023, doi: 10.1186/s12911-023-02244-x.
+\bibitem{b28} V. Suresh \textit{et al.}, ``A lightweight machine learning tool for Alzheimer's disease prediction,'' \textit{Alzheimer's Dement. Diagn. Assess. Dis. Monit.}, vol. 17, no. 4, e70187, 2025, doi: 10.1002/dad2.70187.
+\bibitem{b29} V. M. Young, S. Gates, L. Y. Garcia, and A. Salardini, ``Data leakage in deep learning for Alzheimer's disease diagnosis: a scoping review of methodological rigor and performance inflation,'' \textit{Diagnostics}, vol. 15, no. 18, art. 2348, 2025, doi: 10.3390/diagnostics15182348.
+\bibitem{b30} M. Shim, S.-H. Lee, and H.-J. Hwang, ``Inflated prediction accuracy of neuropsychiatric biomarkers caused by data leakage in feature selection,'' \textit{Sci. Rep.}, vol. 11, art. 7980, 2021, doi: 10.1038/s41598-021-87157-3.
+\bibitem{b31} M. J. van der Laan, E. C. Polley, and A. E. Hubbard, ``Super Learner,'' \textit{Stat. Appl. Genet. Mol. Biol.}, vol. 6, no. 1, art. 25, 2007, doi: 10.2202/1544-6115.1309.
+\bibitem{b32} B. Van Calster, D. J. McLernon, M. van Smeden, L. Wynants, and E. W. Steyerberg, ``Calibration: the Achilles heel of predictive analytics,'' \textit{BMC Med.}, vol. 17, art. 230, 2019, doi: 10.1186/s12916-019-1466-7.
+\bibitem{b33} A. J. Vickers and E. B. Elkin, ``Decision curve analysis: a novel method for evaluating prediction models,'' \textit{Med. Decis. Making}, vol. 26, no. 6, pp. 565--574, 2006, doi: 10.1177/0272989X06295361.
+\bibitem{b34} G. S. Collins \textit{et al.}, ``TRIPOD+AI statement: updated guidance for reporting clinical prediction models that use regression or machine learning methods,'' \textit{BMJ}, vol. 385, e078378, 2024, doi: 10.1136/bmj-2023-078378.
+\bibitem{b35} K. G. M. Moons \textit{et al.}, ``PROBAST+AI: an updated quality, risk of bias, and applicability assessment tool for prediction models using regression or artificial intelligence methods,'' \textit{BMJ}, vol. 388, e082505, 2025, doi: 10.1136/bmj-2024-082505.
+\bibitem{b36} N. An, H. Ding, J. Yang, R. Au, and T. F. A. Ang, ``Deep ensemble learning for Alzheimer's disease classification,'' \textit{J. Biomed. Inform.}, vol. 105, art. 103411, 2020, doi: 10.1016/j.jbi.2020.103411.
+\bibitem{b37} M. K. Hossain, A. Ashraf, M. M. Islam, S. H. Sourav, and M. M. H. Shimul, ``Optimizing Alzheimer's disease prediction through ensemble learning and feature interpretability with SHAP-based feature analysis,'' \textit{Alzheimer's Dement. Diagn. Assess. Dis. Monit.}, vol. 17, no. 3, e70162, 2025, doi: 10.1002/dad2.70162.
+\bibitem{b38} A. Almohimeed, R. M. A. Saad, S. Mostafa, N. El-Rashidy, S. Farag, A. Gaballah, M. Abd Elaziz, S. El-Sappagh, and H. Saleh, ``Explainable artificial intelligence of multi-level stacking ensemble for detection of Alzheimer's disease based on particle swarm optimization and the sub-scores of cognitive biomarkers,'' \textit{IEEE Access}, vol. 11, 2023, doi: 10.1109/ACCESS.2023.3328331.
+\bibitem{b39} P. O. Akinwumi, M. Qian, T. A. Olorunsogbon, C. Zhou, and S. Huang, ``Machine learning for Alzheimer's disease progression under extreme class imbalance,'' \textit{Front. Neurosci.}, vol. 20, art. 1736992, 2026, doi: 10.3389/fnins.2026.1736992.
+\bibitem{b40} S. Kapoor and A. Narayanan, ``Leakage and the reproducibility crisis in machine-learning-based science,'' \textit{Patterns}, vol. 4, no. 9, art. 100804, 2023, doi: 10.1016/j.patter.2023.100804.
+\bibitem{b41} L. Sasse, E. Nicolaisen-Sobesky, J. Dukart, S. B. Eickhoff, M. G\"otz, S. Hamdan, V. Komeyer, A. Kulkarni, J. M. Lahnakoski, B. C. Love, F. Raimondo, and K. R. Patil, ``Overview of leakage scenarios in supervised machine learning,'' \textit{J. Big Data}, vol. 12, art. 135, 2025, doi: 10.1186/s40537-025-01193-8.
+\bibitem{b42} J. Starcke, J. Spadafora, J. Spadafora, P. Spadafora, and M. Toma, ``The effect of data leakage and feature selection on machine learning performance for early Parkinson's disease detection,'' \textit{Bioengineering}, vol. 12, no. 8, art. 845, 2025, doi: 10.3390/bioengineering12080845.
+\end{thebibliography}
+\end{document}
