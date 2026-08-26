@@ -1,0 +1,22 @@
+# Conda environment pinned to match Table III of the paper exactly.
+# Create with: conda env create -f environment.yml
+# Activate with: conda activate calibre-ad-plus
+name: calibre-ad-plus
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12.13
+  - pandas=2.3.3
+  - numpy=2.0.2
+  - scikit-learn=1.6.1
+  - matplotlib>=3.8
+  - seaborn>=0.13
+  - jupyter
+  - notebook
+  - ipython
+  - pip
+  - pip:
+      - xgboost==3.2.0
+      - lightgbm==4.6.0
+      - catboost==1.2.10
+      - shap>=0.44

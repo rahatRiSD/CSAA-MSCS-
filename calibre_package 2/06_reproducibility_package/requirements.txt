@@ -1,0 +1,14 @@
+# Pinned to match Table III (Hardware and Software Environment) of the paper exactly.
+# Python 3.12.13
+pandas==2.3.3
+numpy==2.0.2
+scikit-learn==1.6.1
+xgboost==3.2.0
+lightgbm==4.6.0
+catboost==1.2.10
+shap>=0.44
+matplotlib>=3.8
+seaborn>=0.13
+jupyter>=1.0
+notebook>=7.0
+ipython>=8.0

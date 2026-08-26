@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this code or methodology, please cite the paper below."
+title: "CALiBRE-AD+: A Nested, Leakage-Audited, Calibrated, Cost-Sensitive Ensemble for Alzheimer's Disease Classification"
+authors:
+  - family-names: "Rihan"
+    given-names: "MD Rahat"
+    affiliation: "American International University-Bangladesh"
+    email: "26-94125-2@student.aiub.edu"
+date-released: 2026
+repository-code: "https://github.com/rahatRiSD/CSAA-MSCS-"
+license: MIT
+keywords:
+  - Alzheimer's disease
+  - data leakage
+  - nested cross-validation
+  - stacked ensemble
+  - probability calibration
+  - cost-sensitive learning
